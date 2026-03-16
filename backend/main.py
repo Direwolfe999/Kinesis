@@ -1,17 +1,23 @@
-from __future__ import annotations
+"""
+KINESIS BACKEND - PRODUCTION GEMINI LIVE API
+Async backend with fallback cascade, quota handling, and WebSocket relay
+
+Architecture:
+  FastAPI server + WebSocket support
+  ├── Gemini Live API (native audio, real-time)
+  ├── Quota detection & fallback cascade
+  ├── Model selection (2.5-flash-native → 2.5-flash → 2.0-flash-lite)
+  └── Browser speech API fallback (local TTS/STT)
+"""
 
 import asyncio
-import base64
-import glob
 import json
 import logging
-import math
 import os
-import re
-import uuid
-from datetime import datetime, timezone
+from typing import Optional
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
 
 # Load .env from workspace root
 _env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -24,23 +30,15 @@ if _env_path.exists():
             if val and key not in os.environ:
                 os.environ[key] = val
 
-import google.auth
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
-from google.adk.agents import LlmAgent
-from google.adk.runners import LiveRequestQueue, RunConfig, Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
 
-from backend.tools import (
-    billing_spend_report,
-    fetch_secret,
-    neural_memory_snapshot,
-    self_upgrade_protocol,
-    system_health_check,
-    verify_required_capabilities,
-)
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    print("ERROR: google-genai not installed. Run: pip install google-genai --upgrade")
+    exit(1)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kinesis-main")
@@ -48,6 +46,8 @@ logger = logging.getLogger("kinesis-main")
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-latest")
 GCP_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 SUMMARY_INTERVAL = int(os.getenv("KINESIS_SUMMARY_INTERVAL", "3"))
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash-lite")
+SECONDARY_MODEL = os.getenv("GEMINI_SECONDARY_MODEL", "gemini-2.5-flash")
 
 # --- Authentication: prefer API key (free tier) over Vertex AI (billing required) ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -172,6 +172,40 @@ def _hint_suggestions(text: str) -> list[str]:
     if not hints:
         hints.append("Use short, specific prompts for faster and more reliable realtime responses.")
     return hints[:2]
+
+
+def _unique_models(models: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for m in models:
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        ordered.append(m)
+    return ordered
+
+
+MODEL_CASCADE = _unique_models([MODEL_NAME, SECONDARY_MODEL, FALLBACK_MODEL])
+
+
+def _gemini_free_fallback_response(text: str) -> str:
+    """Try Gemini cascade silently: native-audio -> flash -> flash-lite -> local continuity."""
+    prompt = (
+        "You are Kinesis in continuity mode. Respond in 1-3 concise sentences. "
+        "Be clear and action-oriented. User message: "
+        f"{text}"
+    )
+
+    for model_name in MODEL_CASCADE:
+        try:
+            response = GENAI_CLIENT.models.generate_content(model=model_name, contents=prompt)
+            candidate_text = getattr(response, "text", None)
+            if candidate_text and candidate_text.strip():
+                return candidate_text.strip()
+        except Exception:
+            continue
+
+    return _local_fallback_response(text)
 
 
 app = FastAPI(title="Project Kinesis Command Center", version="3.0.0")
@@ -305,13 +339,7 @@ class KinesisSession:
         self.fallback_mode = True
         self.fallback_reason = reason
         await self.ws.send_json({"type": "fallback_mode", "enabled": True, "reason": reason, "ts": _now_iso()})
-        await self.ws.send_json(
-            {
-                "type": "brain_log",
-                "level": "warn",
-                "message": f"Fallback mode enabled: {reason}",
-            }
-        )
+        await self.ws.send_json({"type": "agent_text", "text": "Continuity mode engaged. I will keep responding while realtime quota recovers."})
 
     async def start(self) -> None:
         # Pre-create session in ADK's session service so run_live can find it
@@ -347,11 +375,13 @@ class KinesisSession:
                 logger.exception("Gemini Live stream error: %s", exc)
                 msg = str(exc)
                 try:
-                    await self.ws.send_json({"type": "error", "message": f"Agent stream error: {msg}"})
                     if _is_quota_error(msg):
                         await self._send_fallback_notice("quota_exhausted")
                     elif _is_model_error(msg):
                         await self._send_fallback_notice("model_unavailable")
+                    else:
+                        await self.ws.send_json({"type": "error", "message": "Agent stream unavailable. Switching to continuity mode."})
+                        await self._send_fallback_notice("stream_unavailable")
                 except Exception:
                     pass
 
@@ -460,7 +490,11 @@ async def ws_kinesis(websocket: WebSocket) -> None:
                     await websocket.send_json({"type": "agent_hint", "hints": _hint_suggestions(text), "ts": _now_iso()})
 
                     if session.fallback_mode:
-                        await websocket.send_json({"type": "agent_text", "text": _local_fallback_response(text)})
+                        try:
+                            fallback_text = _gemini_free_fallback_response(text)
+                        except Exception:
+                            fallback_text = _local_fallback_response(text)
+                        await websocket.send_json({"type": "agent_text", "text": fallback_text})
                     else:
                         session.live_queue.send_content(
                             types.Content(role="user", parts=[types.Part(text=text)])

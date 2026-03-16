@@ -8,6 +8,7 @@ import LiveTranscription from "../components/LiveTranscription";
 import OpticalFeed from "../components/OpticalFeed";
 import ProtocolLogs from "../components/ProtocolLogs";
 import SystemDiagnostics from "../components/SystemDiagnostics";
+import Intro from "../components/Intro";
 
 type WsEvent =
     | { type: "ready"; sessionId: string; startup?: Record<string, unknown> }
@@ -62,7 +63,38 @@ function floatToPcm16(float32: Float32Array): Int16Array {
     return out;
 }
 
+function cancelSpeechSafely() {
+    if (typeof window === "undefined") return;
+    const synth = (window as Window & { speechSynthesis?: SpeechSynthesis }).speechSynthesis;
+    if (synth && typeof synth.cancel === "function") {
+        synth.cancel();
+    }
+}
+
+function speakTextSafely(text: string) {
+    if (!text || typeof window === "undefined" || typeof SpeechSynthesisUtterance === "undefined") return;
+    const synth = (window as Window & { speechSynthesis?: SpeechSynthesis }).speechSynthesis;
+    if (!synth || typeof synth.speak !== "function") return;
+
+    cancelSpeechSafely();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.02;
+    utterance.pitch = 1.0;
+    utterance.volume = 0.95;
+    synth.speak(utterance);
+}
+
+function getSpeechRecognitionCtor(): (new () => any) | null {
+    if (typeof window === "undefined") return null;
+    const w = window as Window & {
+        SpeechRecognition?: new () => any;
+        webkitSpeechRecognition?: new () => any;
+    };
+    return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
+}
+
 export default function HomePage() {
+    const [showIntro, setShowIntro] = useState(true);
     const [orbState, setOrbState] = useState<OrbState>("idle");
     const [rippling, setRippling] = useState(false);
     const [userLevel, setUserLevel] = useState(0.1);
@@ -92,6 +124,9 @@ export default function HomePage() {
     const transcriptionTimerRef = useRef<number | null>(null);
     const visionEnabledRef = useRef(visionEnabled);
     const micMutedRef = useRef(micMuted);
+    const backendModeRef = useRef<"live" | "fallback">("live");
+    const speechRecRef = useRef<any>(null);
+    const speechRecRunningRef = useRef(false);
 
     useEffect(() => {
         visionEnabledRef.current = visionEnabled;
@@ -100,6 +135,10 @@ export default function HomePage() {
     useEffect(() => {
         micMutedRef.current = micMuted;
     }, [micMuted]);
+
+    useEffect(() => {
+        backendModeRef.current = backendMode;
+    }, [backendMode]);
 
     const wsUrl = useMemo(() => {
         const fallback =
@@ -149,6 +188,63 @@ export default function HomePage() {
         },
         [pushLog, sendJson],
     );
+
+    const stopLocalStt = useCallback(() => {
+        const rec = speechRecRef.current;
+        if (!rec) return;
+        try {
+            rec.onresult = null;
+            rec.onerror = null;
+            rec.onend = null;
+            rec.stop?.();
+        } catch {
+            // ignore
+        }
+        speechRecRef.current = null;
+        speechRecRunningRef.current = false;
+    }, []);
+
+    const startLocalStt = useCallback(() => {
+        if (speechRecRunningRef.current) return;
+        const Ctor = getSpeechRecognitionCtor();
+        if (!Ctor) return;
+
+        try {
+            const rec = new Ctor();
+            rec.lang = "en-US";
+            rec.continuous = true;
+            rec.interimResults = false;
+
+            rec.onresult = (event: any) => {
+                const results = event?.results;
+                if (!results || !results.length) return;
+                const result = results[results.length - 1];
+                const transcript = result?.[0]?.transcript?.trim?.();
+                if (transcript) {
+                    sendPrompt(transcript);
+                }
+            };
+
+            rec.onerror = () => {
+                speechRecRunningRef.current = false;
+            };
+
+            rec.onend = () => {
+                speechRecRunningRef.current = false;
+                if (backendModeRef.current === "fallback" && orbState !== "idle") {
+                    window.setTimeout(() => {
+                        startLocalStt();
+                    }, 450);
+                }
+            };
+
+            rec.start();
+            speechRecRef.current = rec;
+            speechRecRunningRef.current = true;
+        } catch {
+            speechRecRunningRef.current = false;
+        }
+    }, [orbState, sendPrompt]);
 
     const teardownMedia = useCallback(async () => {
         if (frameTimerRef.current) {
@@ -254,6 +350,11 @@ export default function HomePage() {
                 setOrbState("thinking");
                 showTransientTranscript(msg.text);
                 pushLog(`Kinesis: ${msg.text}`);
+
+                if (backendModeRef.current === "fallback") {
+                    speakTextSafely(msg.text);
+                }
+
                 window.setTimeout(() => setOrbState("listening"), 320);
             } else if (msg.type === "agent_audio") {
                 const audio = audioRef.current;
@@ -277,9 +378,6 @@ export default function HomePage() {
                 }));
             } else if (msg.type === "fallback_mode") {
                 setBackendMode(msg.enabled ? "fallback" : "live");
-                if (msg.enabled) {
-                    pushLog(`[WARN] Backend fallback mode: ${msg.reason ?? "unknown"}`);
-                }
             } else if (msg.type === "agent_hint") {
                 for (const hint of msg.hints ?? []) {
                     pushLog(`[HINT] ${hint}`);
@@ -294,6 +392,7 @@ export default function HomePage() {
                 setShowDiag(true);
             } else if (msg.type === "barge_in_ack") {
                 setRippling(true);
+                cancelSpeechSafely();
                 window.setTimeout(() => setRippling(false), 280);
             } else if (msg.type === "error") {
                 setOrbState("error");
@@ -330,11 +429,13 @@ export default function HomePage() {
         manualDisconnectRef.current = true;
         wsRef.current?.close();
         wsRef.current = null;
+        cancelSpeechSafely();
+        stopLocalStt();
         await teardownMedia();
         clearTranscription();
         setTranscript("");
         setOrbState("idle");
-    }, [clearTranscription, teardownMedia]);
+    }, [clearTranscription, stopLocalStt, teardownMedia]);
 
     useEffect(() => {
         const audio = audioRef.current;
@@ -384,134 +485,172 @@ export default function HomePage() {
     }, [pushLog, sendPrompt]);
 
     useEffect(() => {
+        if (backendMode === "fallback" && orbState !== "idle") {
+            startLocalStt();
+        } else {
+            stopLocalStt();
+        }
+
+        return () => {
+            stopLocalStt();
+        };
+    }, [backendMode, orbState, startLocalStt, stopLocalStt]);
+
+    useEffect(() => {
         return () => {
             void disconnect();
         };
     }, [disconnect]);
 
     return (
-        <main className="relative min-h-screen overflow-hidden bg-[#050505] text-slate-100">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_48%,rgba(30,41,59,0.35),transparent_58%)]" />
-
+        <>
+            {/* Intro Screen */}
             <AnimatePresence>
-                {orbState === "reconnecting" && (
+                {showIntro && (
                     <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
+                        initial={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="absolute inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm"
+                        transition={{ duration: 0.8 }}
+                        className="fixed inset-0 z-50 bg-slate-950"
                     >
-                        <div className="reconnect-grid rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-center backdrop-blur-xl sm:px-6 sm:py-4">
-                            <p className="text-sm tracking-wide text-slate-200 sm:text-lg">Kinesis // Realigning Neural Pathways...</p>
-                        </div>
+                        <Intro />
+                        <motion.button
+                            onClick={() => setShowIntro(false)}
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: 3.5, duration: 0.5 }}
+                            className="fixed bottom-8 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-gradient-to-r from-blue-500 to-cyan-500 px-8 py-3 font-semibold text-white hover:shadow-2xl hover:shadow-blue-500/50 transition-all duration-300"
+                        >
+                            Skip to Interface
+                        </motion.button>
                     </motion.div>
                 )}
             </AnimatePresence>
 
-            <OpticalFeed active={cameraActive} videoRef={videoRef} />
-            <SystemDiagnostics visible={showDiag} metrics={metrics} />
-            <ProtocolLogs logs={logs} />
-            <LiveTranscription text={transcript} />
+            {/* Main Interface */}
+            <main className="relative min-h-screen overflow-hidden bg-[#050505] text-slate-100">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_48%,rgba(30,41,59,0.35),transparent_58%)]" />
 
-            <section className="relative z-10 flex min-h-screen items-center justify-center px-4">
-                <div className="text-center">
-                    <div className="mb-3 flex flex-wrap items-center justify-center gap-2 text-[9px] uppercase tracking-[0.16em] sm:text-[10px]">
-                        <span className={`rounded-full border px-2 py-1 ${backendMode === "fallback" ? "border-amber-300/40 bg-amber-500/10 text-amber-200" : "border-emerald-300/40 bg-emerald-500/10 text-emerald-200"}`}>
-                            {backendMode === "fallback" ? "fallback mode" : "live mode"}
-                        </span>
-                        <span className={`rounded-full border px-2 py-1 ${visionEnabled ? "border-cyan-300/40 bg-cyan-500/10 text-cyan-200" : "border-slate-500/40 bg-slate-700/20 text-slate-300"}`}>
-                            vision {visionEnabled ? "on" : "off"}
-                        </span>
-                        <span className={`rounded-full border px-2 py-1 ${micMuted ? "border-rose-300/40 bg-rose-500/10 text-rose-200" : "border-cyan-300/40 bg-cyan-500/10 text-cyan-200"}`}>
-                            mic {micMuted ? "muted" : "live"}
-                        </span>
-                        {lastPingMs !== null && (
-                            <span className="rounded-full border border-white/20 bg-white/5 px-2 py-1 text-slate-200">ping {lastPingMs}ms</span>
-                        )}
+                <AnimatePresence>
+                    {orbState === "reconnecting" && (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="absolute inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm"
+                        >
+                            <div className="reconnect-grid rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-center backdrop-blur-xl sm:px-6 sm:py-4">
+                                <p className="text-sm tracking-wide text-slate-200 sm:text-lg">Kinesis // Realigning Neural Pathways...</p>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
+                <OpticalFeed active={cameraActive} videoRef={videoRef} />
+                <SystemDiagnostics visible={showDiag} metrics={metrics} />
+                <ProtocolLogs logs={logs} />
+                <LiveTranscription text={transcript} />
+
+                <section className="relative z-10 flex min-h-screen items-center justify-center px-4">
+                    <div className="text-center">
+                        <div className="mb-3 flex flex-wrap items-center justify-center gap-2 text-[9px] uppercase tracking-[0.16em] sm:text-[10px]">
+                            <span className={`rounded-full border px-2 py-1 ${backendMode === "fallback" ? "border-amber-300/40 bg-amber-500/10 text-amber-200" : "border-emerald-300/40 bg-emerald-500/10 text-emerald-200"}`}>
+                                {backendMode === "fallback" ? "fallback mode" : "live mode"}
+                            </span>
+                            <span className={`rounded-full border px-2 py-1 ${visionEnabled ? "border-cyan-300/40 bg-cyan-500/10 text-cyan-200" : "border-slate-500/40 bg-slate-700/20 text-slate-300"}`}>
+                                vision {visionEnabled ? "on" : "off"}
+                            </span>
+                            <span className={`rounded-full border px-2 py-1 ${micMuted ? "border-rose-300/40 bg-rose-500/10 text-rose-200" : "border-cyan-300/40 bg-cyan-500/10 text-cyan-200"}`}>
+                                mic {micMuted ? "muted" : "live"}
+                            </span>
+                            {lastPingMs !== null && (
+                                <span className="rounded-full border border-white/20 bg-white/5 px-2 py-1 text-slate-200">ping {lastPingMs}ms</span>
+                            )}
+                        </div>
+                        <h1 className="mb-1 bg-gradient-to-r from-cyan-300 via-white to-cyan-300 bg-clip-text text-[13px] font-extralight uppercase tracking-[0.45em] text-transparent drop-shadow-[0_0_12px_rgba(103,232,249,0.35)] sm:mb-2 sm:text-base sm:tracking-[0.5em] md:text-lg">
+                            KINESIS
+                        </h1>
+                        <div className="mx-auto mb-3 h-px w-10 bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent sm:mb-4 sm:w-14" />
+                        <KinesisOrb state={orbState} userLevel={userLevel} aiLevel={aiLevel} rippling={rippling} />
+                        <p className="mt-3 text-[9px] font-light uppercase tracking-[0.25em] text-slate-400/90 sm:mt-4 sm:text-[11px] sm:tracking-[0.3em]">
+                            {orbState === "idle" ? "awaiting signal" : orbState}
+                        </p>
                     </div>
-                    <h1 className="mb-1 bg-gradient-to-r from-cyan-300 via-white to-cyan-300 bg-clip-text text-[13px] font-extralight uppercase tracking-[0.45em] text-transparent drop-shadow-[0_0_12px_rgba(103,232,249,0.35)] sm:mb-2 sm:text-base sm:tracking-[0.5em] md:text-lg">
-                        KINESIS
-                    </h1>
-                    <div className="mx-auto mb-3 h-px w-10 bg-gradient-to-r from-transparent via-cyan-400/40 to-transparent sm:mb-4 sm:w-14" />
-                    <KinesisOrb state={orbState} userLevel={userLevel} aiLevel={aiLevel} rippling={rippling} />
-                    <p className="mt-3 text-[9px] font-light uppercase tracking-[0.25em] text-slate-400/90 sm:mt-4 sm:text-[11px] sm:tracking-[0.3em]">
-                        {orbState === "idle" ? "awaiting signal" : orbState}
-                    </p>
-                </div>
-            </section>
+                </section>
 
-            <audio ref={audioRef} className="hidden" />
+                <audio ref={audioRef} className="hidden" />
 
-            <div
-                role="button"
-                tabIndex={0}
-                onMouseEnter={() => setHovering(true)}
-                onMouseLeave={() => setHovering(false)}
-                onClick={() => {
-                    if (orbState === "idle") {
-                        void connect();
-                    } else {
-                        sendJson({ type: "barge_in" });
-                        setRippling(true);
-                        window.setTimeout(() => setRippling(false), 280);
-                    }
-                }}
-                onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
+                <div
+                    role="button"
+                    tabIndex={0}
+                    onMouseEnter={() => setHovering(true)}
+                    onMouseLeave={() => setHovering(false)}
+                    onClick={() => {
                         if (orbState === "idle") {
                             void connect();
                         } else {
                             sendJson({ type: "barge_in" });
+                            setRippling(true);
+                            window.setTimeout(() => setRippling(false), 280);
                         }
-                    }
-                    if (e.key.toLowerCase() === "x") {
-                        void disconnect();
-                    }
-                }}
-                className="absolute inset-0 z-30 cursor-pointer"
-                aria-label="Toggle voice presence"
-            />
+                    }}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            if (orbState === "idle") {
+                                void connect();
+                            } else {
+                                sendJson({ type: "barge_in" });
+                            }
+                        }
+                        if (e.key.toLowerCase() === "x") {
+                            void disconnect();
+                        }
+                    }}
+                    className="absolute inset-0 z-30 cursor-pointer"
+                    aria-label="Toggle voice presence"
+                />
 
-            <div className="pointer-events-auto absolute bottom-3 left-1/2 z-[70] w-[min(92vw,28rem)] -translate-x-1/2 rounded-xl border border-white/15 bg-black/40 p-2 backdrop-blur-xl sm:bottom-5 sm:p-3">
-                <div className="flex gap-2">
-                    <input
-                        value={promptText}
-                        onChange={(e) => setPromptText(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                                e.preventDefault();
+                <div className="pointer-events-auto absolute bottom-3 left-1/2 z-[70] w-[min(92vw,28rem)] -translate-x-1/2 rounded-xl border border-white/15 bg-black/40 p-2 backdrop-blur-xl sm:bottom-5 sm:p-3">
+                    <div className="flex gap-2">
+                        <input
+                            value={promptText}
+                            onChange={(e) => setPromptText(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    sendPrompt(promptText);
+                                    setPromptText("");
+                                }
+                            }}
+                            placeholder="Type prompt · Enter to send · V vision · M mute · T test"
+                            className="w-full rounded-md border border-white/20 bg-black/30 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none"
+                        />
+                        <button
+                            onClick={() => {
                                 sendPrompt(promptText);
                                 setPromptText("");
-                            }
-                        }}
-                        placeholder="Type prompt · Enter to send · V vision · M mute · T test"
-                        className="w-full rounded-md border border-white/20 bg-black/30 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none"
-                    />
-                    <button
-                        onClick={() => {
-                            sendPrompt(promptText);
-                            setPromptText("");
-                        }}
-                        className="rounded-md border border-cyan-300/40 bg-cyan-500/10 px-3 py-2 text-xs uppercase tracking-[0.12em] text-cyan-200 hover:bg-cyan-500/20"
-                    >
-                        Send
-                    </button>
+                            }}
+                            className="rounded-md border border-cyan-300/40 bg-cyan-500/10 px-3 py-2 text-xs uppercase tracking-[0.12em] text-cyan-200 hover:bg-cyan-500/20"
+                        >
+                            Send
+                        </button>
+                    </div>
                 </div>
-            </div>
 
-            <AnimatePresence>
-                {hovering && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 6 }}
-                        className="pointer-events-none absolute bottom-3 left-1/2 z-[60] -translate-x-1/2 whitespace-nowrap rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-[10px] uppercase tracking-[0.15em] text-slate-200 backdrop-blur sm:bottom-6 sm:px-4 sm:py-2 sm:text-xs sm:tracking-[0.2em]"
-                    >
-                        {orbState === "idle" ? "Tap to Initialize Mic/Camera" : "Tap to Barge-In · Press X to Halt"}
-                    </motion.div>
-                )}
-            </AnimatePresence>
-        </main>
+                <AnimatePresence>
+                    {hovering && (
+                        <motion.div
+                            initial={{ opacity: 0, y: 6 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 6 }}
+                            className="pointer-events-none absolute bottom-3 left-1/2 z-[60] -translate-x-1/2 whitespace-nowrap rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-[10px] uppercase tracking-[0.15em] text-slate-200 backdrop-blur sm:bottom-6 sm:px-4 sm:py-2 sm:text-xs sm:tracking-[0.2em]"
+                        >
+                            {orbState === "idle" ? "Tap to Initialize Mic/Camera" : "Tap to Barge-In · Press X to Halt"}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </main>
+        </>
     );
 }
