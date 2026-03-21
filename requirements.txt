@@ -1,0 +1,29 @@
+# SynAegis: Real-Time Multimodal AI Agent
+# Python 3.10+ required
+# Usage: pip install --user -r requirements.txt
+
+# Core AI/ML
+google-genai>=0.8.0          # Google Gemini AI SDK
+python-dotenv>=1.0.0        # Environment variable management
+
+# Web Framework
+fastapi>=0.104.1            # Modern async web framework
+uvicorn>=0.24.0             # ASGI server for FastAPI
+starlette>=0.35.0           # Base for FastAPI
+
+# WebSocket & Real-time Communication
+websockets>=12.0            # WebSocket protocol support
+aiohttp>=3.9.0              # Async HTTP client
+
+# Data Processing & Utilities
+python-multipart>=0.0.6     # Multipart form data support
+pydantic>=2.4.0             # Data validation
+
+# Development Tools (optional but recommended)
+pytest>=7.4.0               # Testing framework
+black>=23.11.0              # Code formatter
+flake8>=6.1.0               # Linter
+
+# Optional: Cloud Deployment
+# google-cloud-run>=0.10.0  # For Cloud Run deployment
+# google-cloud-logging>=3.5.0  # For structured logging
