@@ -12,10 +12,24 @@ export function Sidebar({ activeView, setActiveView }: { activeView: string, set
   ];
 
   return (
-    <div className="fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 bg-black/40 border-r border-white/10 backdrop-blur-xl z-[100] transition-all duration-300 hover:w-64 group overflow-hidden">
-      <div className="w-12 h-12 mb-8 flex-shrink-0">
-        <img src="/logos/wording.png" alt="Logo" className="w-full h-full object-contain opacity-0 group-hover:opacity-100 transition-opacity absolute left-4 w-48" style={{ filter: 'drop-shadow(0 0 8px rgba(6,182,212,0.8))' }} />
-        <img src="/logos/logo.png" alt="Icon" className="w-10 h-10 object-contain group-hover:opacity-0 transition-opacity" />
+    <div className="fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 bg-black/40 border-r border-white/10 backdrop-blur-xl z-[100] transition-all duration-300 hover:w-64 group overflow-x-hidden overflow-y-auto">
+      <div className="w-full flex items-center justify-center h-16 pt-4 mb-4 flex-shrink-0 relative overflow-hidden">
+        {/* SMALL LOGO: Visible only when sidebar is collapsed (group-hover:opacity-0 hides it on expand) */}
+        <img 
+          src="/logos/logo.png" 
+          alt="SynAegis Icon" 
+          className="absolute w-10 h-10 object-contain transition-opacity duration-300 opacity-100 group-hover:opacity-0" 
+        />
+        
+        {/* WIDE LOGO: Hidden by default, fades in and stays centered when sidebar expands */}
+        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none">
+            <img 
+              src="/logos/wording.png" 
+              alt="SynAegis Text Logo" 
+              className="w-48 h-auto object-contain pl-4" 
+              style={{ filter: 'drop-shadow(0 0 8px rgba(6,182,212,0.6))' }} 
+            />
+        </div>
       </div>
 
       <div className="flex flex-col gap-4 w-full px-4">
