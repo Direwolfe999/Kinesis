@@ -1,3 +1,4 @@
+"use client";
 import React, { createContext, useContext, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -9,8 +10,11 @@ interface Toast {
     type: ToastType;
 }
 
+export interface ModalOptions { title: string; content: React.ReactNode; }
 interface ToastContextType {
     addToast: (message: string, type?: ToastType) => void;
+    showModal: (options: ModalOptions) => void;
+    closeModal: () => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -23,6 +27,10 @@ export const useToast = () => {
 
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [toasts, setToasts] = useState<Toast[]>([]);
+    const [modal, setModal] = useState<ModalOptions | null>(null);
+
+    const showModal = useCallback((options: ModalOptions) => setModal(options), []);
+    const closeModal = useCallback(() => setModal(null), []);
 
     const addToast = useCallback((message: string, type: ToastType = 'info') => {
         const id = Date.now();
@@ -33,7 +41,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }, []);
 
     return (
-        <ToastContext.Provider value={{ addToast }}>
+        <ToastContext.Provider value={{ addToast, showModal, closeModal }}>
             {children}
             <div className="fixed top-8 right-8 z-[300] flex flex-col gap-3 pointer-events-none">
                 <AnimatePresence>
@@ -61,6 +69,24 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     ))}
                 </AnimatePresence>
             </div>
+        
+            {modal && (
+                <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 pointer-events-auto">
+                    <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} className="w-full max-w-md rounded-2xl bg-[#0a0a0a] border border-white/10 shadow-2xl overflow-hidden flex flex-col font-sans">
+                        <div className="px-5 py-4 border-b border-white/10 flex justify-between items-center bg-white/5">
+                            <h3 className="font-semibold text-lg text-slate-100">{modal.title}</h3>
+                            <button onClick={closeModal} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors text-slate-400 hover:text-white">✕</button>
+                        </div>
+                        <div className="p-6 text-sm text-slate-300 leading-relaxed whitespace-pre-wrap max-h-[60vh] overflow-y-auto">
+                            {modal.content}
+                        </div>
+                        <div className="px-5 py-4 border-t border-white/10 bg-white/5 flex gap-3 justify-end items-center">
+                            <button onClick={closeModal} className="px-4 py-2 rounded-lg font-medium bg-white text-black hover:bg-slate-200 transition-colors shadow-lg">Acknowledge</button>
+                        </div>
+                    </motion.div>
+                </div>
+            )}
+    
         </ToastContext.Provider>
     );
 };

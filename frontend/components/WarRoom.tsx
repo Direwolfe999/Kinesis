@@ -1,6 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
+import { useToast } from "./ToastProvider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import SynAegisOrb, { type OrbState } from "../components/SynAegisOrb";
@@ -8,11 +9,11 @@ import LiveTranscription from "../components/LiveTranscription";
 import OpticalFeed from "../components/OpticalFeed";
 import ProtocolLogs from "../components/ProtocolLogs";
 import SystemDiagnostics from "../components/SystemDiagnostics";
-import Intro from "../components/Intro";
 
 type WsEvent =
     | { type: "ready"; sessionId: string; startup?: Record<string, unknown> }
     | { type: "agent_text"; text: string }
+    | { type: "event"; event: string; tool?: string; state?: string; }
     | { type: "agent_audio"; mimeType: string; data: string }
     | { type: "agent_hint"; hints: string[] }
     | { type: "session_summary"; summary: string }
@@ -34,7 +35,7 @@ type Metrics = {
 };
 
 const FRAME_INTERVAL_MS = 1200;
-const RECONNECT_MIN_MS = 600;
+const RECONNECT_MIN_MS = 2500;
 const DEFAULT_SEND_VIDEO_TO_AGENT = process.env.NEXT_PUBLIC_SEND_VIDEO_TO_AGENT === "true";
 
 function toBase64(buffer: ArrayBufferLike): string {
@@ -94,7 +95,7 @@ function getSpeechRecognitionCtor(): (new () => any) | null {
 }
 
 export default function WarRoom() {
-    const [showIntro, setShowIntro] = useState(true);
+    const { showModal } = useToast();
     const [orbState, setOrbState] = useState<OrbState>("idle");
     const [rippling, setRippling] = useState(false);
     const [userLevel, setUserLevel] = useState(0.1);
@@ -271,50 +272,69 @@ export default function WarRoom() {
     }, []);
 
     const startMedia = useCallback(async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({
-            audio: { sampleRate: 16000, channelCount: 1, noiseSuppression: true, echoCancellation: true },
-            video: { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 20, max: 24 } },
-        });
+        try {
+            await teardownMedia(); // Prevent duplicate streams if called twice
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { sampleRate: 16000, channelCount: 1, noiseSuppression: true, echoCancellation: true },
+                video: { width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 20, max: 24 } },
+            });
 
-        mediaRef.current = stream;
-        setCameraActive(true);
+            mediaRef.current = stream;
+            setCameraActive(true);
 
-        const audioCtx = new AudioContext({ sampleRate: 16000 });
-        const source = audioCtx.createMediaStreamSource(stream);
-        const processor = audioCtx.createScriptProcessor(1024, 1, 1);
-        source.connect(processor);
-        processor.connect(audioCtx.destination);
+            const audioCtx = new AudioContext({ sampleRate: 16000 });
+            const source = audioCtx.createMediaStreamSource(stream);
+            // Suppress Chrome deprecation warning about ScriptProcessorNode if possible
+            const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
 
-        processor.onaudioprocess = (event) => {
-            const pcm = floatToPcm16(event.inputBuffer.getChannelData(0));
-            const level = Math.min(1, Math.max(0.08, Math.sqrt(pcm.reduce((a, b) => a + b * b, 0) / pcm.length) / 9000));
-            setUserLevel(level);
-            setOrbState((prev) => (prev === "thinking" || prev === "speaking" ? prev : "listening"));
-            if (micMutedRef.current) return;
-            sendJson({ type: "media", mimeType: "audio/pcm", sampleRate: 16000, data: toBase64(pcm.buffer) });
-        };
+            audioCtxRef.current = audioCtx;
+            sourceRef.current = source;
+            processorRef.current = processor;
 
-        audioCtxRef.current = audioCtx;
-        sourceRef.current = source;
-        processorRef.current = processor;
+            processor.onaudioprocess = (event) => {
+                const pcm = floatToPcm16(event.inputBuffer.getChannelData(0));
+                const level = Math.min(1, Math.max(0.08, Math.sqrt(pcm.reduce((a, b) => a + b * b, 0) / pcm.length) / 9000));
+                setUserLevel(level);
+                setOrbState((prev) => (prev === "thinking" || prev === "speaking" ? prev : "listening"));
+                if (micMutedRef.current) return;
+                sendJson({ type: "media", mimeType: "audio/pcm", sampleRate: 16000, data: toBase64(pcm.buffer) });
+            };
 
-        frameTimerRef.current = window.setInterval(() => {
-            if (!visionEnabledRef.current) return;
-            const video = videoRef.current;
-            if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
-            const canvas = document.createElement("canvas");
-            canvas.width = 320;
-            canvas.height = 180;
-            const ctx = canvas.getContext("2d");
-            if (!ctx) return;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const b64 = canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
-            sendJson({ type: "media", mimeType: "image/jpeg", data: b64 });
-        }, FRAME_INTERVAL_MS);
-    }, [sendJson]);
+            audioCtxRef.current = audioCtx;
+            sourceRef.current = source;
+            processorRef.current = processor;
+
+            frameTimerRef.current = window.setInterval(() => {
+                if (!visionEnabledRef.current) return;
+                const video = videoRef.current;
+                if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+                const canvas = document.createElement("canvas");
+                canvas.width = 320;
+                canvas.height = 180;
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const b64 = canvas.toDataURL("image/jpeg", 0.5).split(",")[1];
+                sendJson({ type: "media", mimeType: "image/jpeg", data: b64 });
+            }, FRAME_INTERVAL_MS);
+        } catch (err) {
+            console.error("Media Error:", err);
+            setCameraActive(false);
+        }
+    }, [sendJson, teardownMedia]);
 
     const connect = useCallback(async () => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) return;
+        if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) return;
+
+        // Prevent duplicate overlapping websockets
+        if (wsRef.current) {
+            wsRef.current.onclose = null;
+            wsRef.current.close();
+            wsRef.current = null;
+        }
+
         manualDisconnectRef.current = false;
         setOrbState("reconnecting");
         const ws = new WebSocket(wsUrl);
@@ -345,6 +365,10 @@ export default function WarRoom() {
                         monitoring_series: Number((startup.monitoring as Record<string, unknown> | undefined)?.series_seen ?? 0),
                         capabilities_ok: Boolean(startup.ok),
                     });
+                }
+            } else if (msg.type === "event") {
+                if (msg.event === "tool_call" && msg.tool) {
+                    showModal({ title: "System Tool Executed", children: <p>{`AI deployed tool: ${msg.tool}`}</p> });
                 }
             } else if (msg.type === "agent_text") {
                 setOrbState("thinking");
@@ -418,7 +442,7 @@ export default function WarRoom() {
             }
             const attempt = reconnectAttemptsRef.current + 1;
             reconnectAttemptsRef.current = attempt;
-            const wait = Math.min(6000, RECONNECT_MIN_MS * attempt);
+            const wait = Math.min(15000, RECONNECT_MIN_MS * attempt * 2);
             setOrbState("reconnecting");
             pushLog(`Realtime link dropped. Retry in ${wait}ms.`);
             window.setTimeout(() => void connect(), wait);
@@ -506,17 +530,6 @@ export default function WarRoom() {
         <>
             {/* Intro Screen */}
             <AnimatePresence>
-                {showIntro && (
-                    <motion.div
-                        initial={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.8 }}
-                        className="fixed inset-0 z-50 bg-slate-950"
-                    >
-                        <Intro />
-
-                    </motion.div>
-                )}
             </AnimatePresence>
 
             {/* Main Interface */}
@@ -611,33 +624,33 @@ export default function WarRoom() {
                     aria-label="Toggle voice presence"
                 />
 
-                {!showIntro && (
-                <div className="pointer-events-auto absolute bottom-16 left-1/2 z-[40] w-[min(92vw,28rem)] -translate-x-1/2 rounded-xl border border-white/15 bg-black/40 p-2 backdrop-blur-xl sm:bottom-20 sm:p-3">
-                    <div className="flex gap-2">
-                        <input
-                            value={promptText}
-                            onChange={(e) => setPromptText(e.target.value)}
-                            onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                    e.preventDefault();
+                {true && (
+                    <div className="pointer-events-auto absolute bottom-16 left-1/2 z-[40] w-[min(92vw,28rem)] -translate-x-1/2 rounded-xl border border-white/15 bg-black/40 p-2 backdrop-blur-xl sm:bottom-20 sm:p-3">
+                        <div className="flex gap-2">
+                            <input
+                                value={promptText}
+                                onChange={(e) => setPromptText(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        sendPrompt(promptText);
+                                        setPromptText("");
+                                    }
+                                }}
+                                placeholder="Type prompt · Enter to send · V vision · M mute · T test"
+                                className="w-full rounded-md border border-white/20 bg-black/30 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none"
+                            />
+                            <button
+                                onClick={() => {
                                     sendPrompt(promptText);
                                     setPromptText("");
-                                }
-                            }}
-                            placeholder="Type prompt · Enter to send · V vision · M mute · T test"
-                            className="w-full rounded-md border border-white/20 bg-black/30 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none"
-                        />
-                        <button
-                            onClick={() => {
-                                sendPrompt(promptText);
-                                setPromptText("");
-                            }}
-                            className="rounded-md border border-cyan-300/40 bg-cyan-500/10 px-3 py-2 text-xs uppercase tracking-[0.12em] text-cyan-200 hover:bg-cyan-500/20"
-                        >
-                            Send
-                        </button>
+                                }}
+                                className="rounded-md border border-cyan-300/40 bg-cyan-500/10 px-3 py-2 text-xs uppercase tracking-[0.12em] text-cyan-200 hover:bg-cyan-500/20"
+                            >
+                                Send
+                            </button>
+                        </div>
                     </div>
-                </div>
                 )}
 
                 {/* Subtle immersive logo background */}

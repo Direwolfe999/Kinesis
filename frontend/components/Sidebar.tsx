@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 
 export function Sidebar({ activeView, setActiveView }: { activeView: string, setActiveView: (v: any) => void }) {

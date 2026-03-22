@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 export const StatCard = ({ title, value, trend, icon, colorClass }: any) => (
   <motion.div 
     whileHover={{ y: -2 }}
-    className={`p-5 rounded-2xl bg-white/[0.02] border border-white/5 backdrop-blur-md flex flex-col justify-between hover:bg-white/[0.04] hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-all duration-300 ${colorClass.replace('text-', 'hover:border-').split(' ')[0]}`}
+    className={`p-5 rounded-2xl bg-white/[0.02] border border-white/5 backdrop-blur-md flex flex-col justify-between hover:bg-white/[0.04] hover:shadow-[0_8px_30px_rgb(0,0,0,0.12)] transition-all duration-300 ${(colorClass || '').replace('text-', 'hover:border-').split(' ')[0]}`}
   >
     <div className="flex justify-between items-start mb-4">
       <span className="text-slate-400 text-sm font-medium tracking-wide">{title}</span>

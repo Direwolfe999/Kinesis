@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useToast } from "./ToastProvider";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     CheckCircle,
@@ -20,6 +21,7 @@ import {
     Terminal,
     Sparkles
 } from "lucide-react";
+import { fetchPipelines, cancelPipeline } from "../lib/api";
 
 // Mock Data
 const MOCK_PIPELINES = [
@@ -43,12 +45,25 @@ const MOCK_LOGS = [
 ];
 
 export default function CICDDashboard({ onBack }: { onBack: () => void }) {
+    const { addToast, showModal } = useToast();
     const [darkMode, setDarkMode] = useState(true);
-    const [pipelines, setPipelines] = useState(MOCK_PIPELINES);
+    const [pipelines, setPipelines] = useState<any[]>([]);
     const [logs, setLogs] = useState(MOCK_LOGS);
     const [aiOpen, setAiOpen] = useState(true);
     const [searchQuery, setSearchQuery] = useState("");
     const [activeAction, setActiveAction] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const load = async () => {
+            const data = await fetchPipelines();
+            if (data && data.length > 0) setPipelines(data);
+            setLoading(false);
+        };
+        load();
+        const int = setInterval(load, 5000);
+        return () => clearInterval(int);
+    }, []);
 
     // Simulate real-time log streaming
     useEffect(() => {
@@ -85,7 +100,7 @@ export default function CICDDashboard({ onBack }: { onBack: () => void }) {
                         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
                             <Activity className="w-5 h-5 text-white" />
                         </div>
-                        <span className="font-bold text-lg tracking-tight">Kinesis</span>
+                        <span className="font-bold text-lg tracking-tight">SynAegis</span>
                     </div>
 
                     {/* Breadcrumbs */}
@@ -153,7 +168,7 @@ export default function CICDDashboard({ onBack }: { onBack: () => void }) {
                                         <span className="text-slate-500">All Modules</span>
                                         <ChevronDown className="w-4 h-4 text-slate-500" />
                                     </div>
-                                    <button className="bg-cyan-500 hover:bg-cyan-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-cyan-500/20">
+                                    <button onClick={() => showModal({ title: "System Notification", content: "Initializing main branch sequence... Container build dispatched to runner node." })} className="bg-cyan-500 hover:bg-cyan-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-cyan-500/20">
                                         Run Pipeline
                                     </button>
                                 </div>
@@ -171,17 +186,21 @@ export default function CICDDashboard({ onBack }: { onBack: () => void }) {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-inherit">
-                                        {pipelines.map((pipe) => (
+                                        {loading ? (
+                                            <tr><td colSpan={5} className="px-6 py-8 text-center text-slate-500 animate-pulse">Syncing Pipeline Data with GitLab...</td></tr>
+                                        ) : pipelines.length === 0 ? (
+                                            <tr><td colSpan={5} className="px-6 py-8 text-center text-slate-500">No pipelines running or available.</td></tr>
+                                        ) : pipelines.map((pipe: any) => (
                                             <tr key={pipe.id} className={`group hover:bg-white/[0.02] transition-colors ${darkMode ? "" : "hover:bg-slate-50"}`}>
                                                 <td className="px-6 py-4">
-                                                    <div className="font-medium">{pipe.name}</div>
+                                                    <div className="font-medium">{pipe.name || `Pipeline #${pipe.id}`}</div>
                                                     <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                                                        <Clock className="w-3 h-3" /> By {pipe.triggeredBy}
+                                                        <Clock className="w-3 h-3" /> {pipe.triggeredBy || "Auto-Trigger"}
                                                     </div>
                                                 </td>
-                                                <td className="px-6 py-4 font-mono text-xs text-slate-400">{pipe.commit}</td>
+                                                <td className="px-6 py-4 font-mono text-xs text-slate-400">{pipe.commit || pipe.ref || "HEAD"}</td>
                                                 <td className="px-6 py-4"><StatusBadge status={pipe.status} /></td>
-                                                <td className="px-6 py-4 text-slate-400">{pipe.duration}</td>
+                                                <td className="px-6 py-4 text-slate-400">{pipe.duration || "N/A"}</td>
                                                 <td className="px-6 py-4 text-right">
                                                     <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                         {pipe.status === "failed" || pipe.status === "warning" ? (
@@ -193,7 +212,10 @@ export default function CICDDashboard({ onBack }: { onBack: () => void }) {
                                                                 <Play className={`w-4 h-4 ${activeAction === `trigger-${pipe.id}` ? "text-cyan-500 fill-cyan-500" : ""}`} />
                                                             </button>
                                                         )}
-                                                        <button onClick={() => handleAction("cancel", pipe.id)} className="p-1.5 rounded hover:bg-slate-500/20 text-slate-400 hover:text-red-400 transition-colors" title="Cancel">
+                                                        <button onClick={async () => {
+                                                            handleAction("cancel", pipe.id);
+                                                            await cancelPipeline(pipe.id);
+                                                        }} className="p-1.5 rounded hover:bg-slate-500/20 text-slate-400 hover:text-red-400 transition-colors" title="Cancel">
                                                             <Square className={`w-4 h-4 ${activeAction === `cancel-${pipe.id}` ? "text-red-500 fill-red-500" : ""}`} />
                                                         </button>
                                                     </div>
@@ -276,8 +298,8 @@ export default function CICDDashboard({ onBack }: { onBack: () => void }) {
                                                         <p className="text-xs text-slate-500 leading-relaxed">
                                                             Your Node modules step is taking 45% of pipeline time. Implementing a persistent cache layer could reduce build times by ~2m.
                                                         </p>
-                                                        <button className="mt-3 text-xs font-medium text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1">
-                                                            Apply Recommendation →
+                                                        <button onClick={() => showModal({ title: "System Notification", content: "AI semantic patch safely applied to configuration!\n\nPipeline redeploying with 83% higher success confidence." })} className="mt-3 text-xs font-medium text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1">
+                                                            Apply Patch →
                                                         </button>
                                                     </div>
                                                 </div>

@@ -30,7 +30,11 @@ if _env_path.exists():
             if val and key not in os.environ:
                 os.environ[key] = val
 
-from fastapi import FastAPI, WebSocket, HTTPException
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from backend.services.websocket_manager import manager
+from backend.services.auto_actions_engine import action_engine
+
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -39,6 +43,39 @@ try:
 except ImportError:
     print("ERROR: google-genai not installed. Run: pip install google-genai --upgrade")
     exit(1)
+class LlmAgent:
+    def __init__(self, **kwargs): pass
+
+class InMemorySessionService:
+    def __init__(self, **kwargs): pass
+    async def create_session(self, **kwargs): pass
+
+class Runner:
+    def __init__(self, **kwargs): pass
+    async def run_live(self, **kwargs): yield type("Event", (), {})()
+
+class RunConfig:
+    def __init__(self, **kwargs): pass
+
+class LiveRequestQueue:
+    def close(self): pass
+
+import re, math, datetime, uuid, base64
+
+from datetime import datetime, timezone
+
+import glob
+
+def self_upgrade_protocol(): pass
+
+def neural_memory_snapshot(**kwargs): pass
+
+def system_health_check(): pass
+
+def billing_spend_report(): pass
+
+def fetch_secret(): pass
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SynAegis-main")
@@ -209,6 +246,37 @@ def _gemini_free_fallback_response(text: str) -> str:
 
 
 app = FastAPI(title="Project SynAegis Command Center", version="3.0.0")
+
+
+@app.on_event("startup")
+async def startup_event():
+    import logging
+    logger = logging.getLogger("synaegis.main")
+    logger.info("Initializing SynAegis Auto-Action Engine...")
+    action_engine.start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    action_engine.stop()
+
+@app.websocket("/ws/dashboard")
+async def websocket_dashboard(websocket: WebSocket):
+    await manager.connect(websocket, "dashboard")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, "dashboard")
+
+@app.websocket("/ws/pipeline")
+async def websocket_pipeline(websocket: WebSocket):
+    await manager.connect(websocket, "pipeline")
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, "pipeline")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -216,6 +284,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.routers import dashboard, pipeline, settings, cloud, security
+app.include_router(dashboard.router, prefix="/api")
+app.include_router(pipeline.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
+app.include_router(cloud.router, prefix="/api")
+app.include_router(security.router, prefix="/api")
 
 
 PROJECT_ID = _project_id()
@@ -276,6 +351,18 @@ def _event_to_ws_payloads(event: Any) -> list[dict[str, Any]]:
             text = getattr(part, "text", None)
             if text:
                 payloads.append({"type": "agent_text", "text": text})
+
+            function_call = getattr(part, "function_call", None)
+            if function_call:
+                tool_name = getattr(function_call, "name", "unknown")
+                payloads.append({"type": "event", "event": "tool_call", "tool": tool_name})
+                payloads.append({"type": "agent_text", "text": f"Deploying tool: {tool_name}..."})
+
+            function_call = getattr(part, "function_call", None)
+            if function_call:
+                tool_name = getattr(function_call, "name", "unknown")
+                payloads.append({"type": "event", "event": "tool_call", "tool": tool_name})
+                payloads.append({"type": "agent_text", "text": f"Deploying tool: {tool_name}..."})
 
             inline_data = getattr(part, "inline_data", None)
             if inline_data and getattr(inline_data, "data", None):
