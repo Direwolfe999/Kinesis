@@ -15,7 +15,7 @@ export default function OpticalFeed({ active, videoRef }: Props) {
                     initial={{ opacity: 0, y: -14 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -14 }}
-                    className="pointer-events-none absolute left-2 top-2 z-20 w-[9rem] rounded-xl border border-white/15 bg-white/5 p-1.5 backdrop-blur-xl sm:left-3 sm:top-3 sm:w-[12rem] sm:rounded-2xl sm:p-2 md:left-5 md:top-5 md:w-[18rem]"
+                    className="pointer-events-none absolute left-2 top-28 z-20 w-[9rem] rounded-xl border border-white/15 bg-white/5 p-1.5 backdrop-blur-xl sm:left-3 sm:top-32 sm:w-[12rem] sm:rounded-2xl sm:p-2 md:left-5 md:top-36 md:w-[18rem]"
                 >
                     <div className="relative overflow-hidden rounded-xl border border-white/10">
                         <video ref={videoRef} muted playsInline className="h-20 w-full bg-black object-cover sm:h-28 md:h-40" />

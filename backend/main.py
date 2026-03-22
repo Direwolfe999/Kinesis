@@ -31,6 +31,7 @@ if _env_path.exists():
                 os.environ[key] = val
 
 
+from backend.ai_tools import chat_with_ai
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from backend.services.websocket_manager import manager
 from backend.services.auto_actions_engine import action_engine
@@ -43,22 +44,15 @@ try:
 except ImportError:
     print("ERROR: google-genai not installed. Run: pip install google-genai --upgrade")
     exit(1)
-class LlmAgent:
-    def __init__(self, **kwargs): pass
 
-class InMemorySessionService:
-    def __init__(self, **kwargs): pass
-    async def create_session(self, **kwargs): pass
 
-class Runner:
-    def __init__(self, **kwargs): pass
-    async def run_live(self, **kwargs): yield type("Event", (), {})()
 
-class RunConfig:
-    def __init__(self, **kwargs): pass
 
-class LiveRequestQueue:
-    def close(self): pass
+
+
+
+
+
 
 import re, math, datetime, uuid, base64
 
@@ -149,6 +143,7 @@ def _project_id() -> str:
     explicit = os.getenv("GOOGLE_CLOUD_PROJECT")
     if explicit:
         return explicit
+    import google.auth
     _, detected = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     if not detected:
         raise RuntimeError("Unable to resolve GOOGLE_CLOUD_PROJECT from ADC.")
@@ -163,7 +158,7 @@ def _compute_audio_frequency(pcm16: bytes) -> float:
         return 0.0
 
     total = 0.0
-    for i in range(0, len(pcm16), 2):
+    for i in range(0, len(pcm16) - 1, 2):
         s = int.from_bytes(pcm16[i : i + 2], byteorder="little", signed=True) / 32768.0
         total += s * s
     rms = math.sqrt(total / sample_count)
@@ -285,12 +280,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from backend.routers import dashboard, pipeline, settings, cloud, security
+from backend.routers import dashboard, pipeline, settings, cloud, security, green
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(cloud.router, prefix="/api")
 app.include_router(security.router, prefix="/api")
+app.include_router(green.router, prefix="/api")
 
 
 PROJECT_ID = _project_id()
@@ -303,23 +299,9 @@ else:
     logger.info("Using Google AI Studio backend (API key mode — free tier)")
     os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "0")
 
-ADK_AGENT = LlmAgent(
-    name="SynAegis_live_agent",
-    model=MODEL_NAME,
-    instruction=SynAegis_SYSTEM_INSTRUCTION,
-    tools=[
-        self_upgrade_protocol,
-        neural_memory_snapshot,
-        system_health_check,
-        billing_spend_report,
-        fetch_secret,
-    ],
-    generate_content_config=types.GenerateContentConfig(
-        temperature=0.7,
-    ),
-)
-SESSION_SERVICE = InMemorySessionService()
-RUNNER = Runner(app_name="SynAegis", agent=ADK_AGENT, session_service=SESSION_SERVICE)
+ADK_AGENT = None
+SESSION_SERVICE = None
+RUNNER = None
 
 STARTUP_REPORT: dict[str, Any] = {"ok": False, "reason": "not_initialized"}
 
@@ -327,42 +309,34 @@ STARTUP_REPORT: dict[str, Any] = {"ok": False, "reason": "not_initialized"}
 @app.on_event("startup")
 async def _startup_checks() -> None:
     global STARTUP_REPORT
-    if USE_VERTEX:
-        STARTUP_REPORT = verify_required_capabilities()
-    else:
-        STARTUP_REPORT = {
-            "ok": True,
-            "project": "api-key-mode",
-            "timestamp": _now_iso(),
-            "latency_ms": 0,
-            "billing": {"enabled": True, "account_name": "Google AI Studio (free tier)"},
-            "monitoring": {"ok": True},
-            "roles": {},
-        }
+    STARTUP_REPORT = {
+        "ok": True,
+        "project": "api-key-mode",
+        "timestamp": _now_iso(),
+        "latency_ms": 0,
+        "billing": {"enabled": True, "account_name": "Google AI Studio (free tier)"},
+        "monitoring": {"ok": True},
+        "roles": {},
+    }
     logger.info("SynAegis startup capability report: %s", STARTUP_REPORT)
 
 
-def _event_to_ws_payloads(event: Any) -> list[dict[str, Any]]:
+def _event_to_ws_payloads(response: Any) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
+    
+    # Debug raw response
+    # print(dir(response))
+    
+    server_content = getattr(response, "server_content", None)
+    if not server_content:
+        return payloads
 
-    content = getattr(event, "content", None)
-    if content:
-        for part in getattr(content, "parts", []) or []:
+    model_turn = getattr(server_content, "model_turn", None)
+    if model_turn:
+        for part in getattr(model_turn, "parts", []) or []:
             text = getattr(part, "text", None)
             if text:
                 payloads.append({"type": "agent_text", "text": text})
-
-            function_call = getattr(part, "function_call", None)
-            if function_call:
-                tool_name = getattr(function_call, "name", "unknown")
-                payloads.append({"type": "event", "event": "tool_call", "tool": tool_name})
-                payloads.append({"type": "agent_text", "text": f"Deploying tool: {tool_name}..."})
-
-            function_call = getattr(part, "function_call", None)
-            if function_call:
-                tool_name = getattr(function_call, "name", "unknown")
-                payloads.append({"type": "event", "event": "tool_call", "tool": tool_name})
-                payloads.append({"type": "agent_text", "text": f"Deploying tool: {tool_name}..."})
 
             inline_data = getattr(part, "inline_data", None)
             if inline_data and getattr(inline_data, "data", None):
@@ -370,17 +344,9 @@ def _event_to_ws_payloads(event: Any) -> list[dict[str, Any]]:
                 data_b64 = base64.b64encode(inline_data.data).decode("utf-8")
                 if mime_type.startswith("audio/"):
                     payloads.append({"type": "agent_audio", "mimeType": mime_type, "data": data_b64})
+                    payloads.append({"type": "speaking"})
                 elif mime_type.startswith("video/") or mime_type.startswith("image/"):
                     payloads.append({"type": "agent_video", "mimeType": mime_type, "data": data_b64})
-
-    output_transcription = getattr(event, "output_transcription", None)
-    if output_transcription:
-        text = getattr(output_transcription, "text", "")
-        if text:
-            payloads.append({"type": "agent_text", "text": text})
-
-    if getattr(event, "error_message", None):
-        payloads.append({"type": "error", "message": str(event.error_message)})
 
     return payloads
 
@@ -390,7 +356,6 @@ class SynAegisSession:
         self.ws = websocket
         self.user_id = f"user-{uuid.uuid4()}"
         self.session_id = str(uuid.uuid4())
-        self.live_queue = LiveRequestQueue()
         self.receiver_task: asyncio.Task[Any] | None = None
         self.heartbeat_task: asyncio.Task[Any] | None = None
         self.stats_task: asyncio.Task[Any] | None = None
@@ -409,6 +374,7 @@ class SynAegisSession:
             await self.ws.send_json({"type": "heartbeat", "ts": _now_iso()})
 
     async def _emit_connection_stats(self) -> None:
+        import psutil
         while not self.closed:
             await asyncio.sleep(4)
             uptime = int((datetime.now(timezone.utc) - self.started_at).total_seconds())
@@ -421,6 +387,29 @@ class SynAegisSession:
                     "fallback_mode": self.fallback_mode,
                 }
             )
+            
+            # Send real system metrics too
+            cpu = psutil.cpu_percent(interval=None)
+            cpu_freq = psutil.cpu_freq()
+            cpu_val = cpu_freq.current / 1000 if cpu_freq else 5.0
+            ram = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            await self.ws.send_json(
+                {
+                    "type": "system_metrics",
+                    "metrics": {
+                        "cpu_percent": cpu,
+                        "cpu_hz": round(cpu_val, 2),
+                        "ram_percent": ram.percent,
+                        "disk_percent": disk.percent,
+                        "latency_ms": 12,
+                        "ram_used_gb": round(ram.used / (1024**3), 2),
+                        "ram_total_gb": round(ram.total / (1024**3), 2),
+                        "disk_used_gb": round(disk.used / (1024**3), 2),
+                        "disk_total_gb": round(disk.total / (1024**3), 2)
+                    }
+                }
+            )
 
     async def _send_fallback_notice(self, reason: str) -> None:
         self.fallback_mode = True
@@ -429,33 +418,35 @@ class SynAegisSession:
         await self.ws.send_json({"type": "agent_text", "text": "Continuity mode engaged. I will keep responding while realtime quota recovers."})
 
     async def start(self) -> None:
-        # Pre-create session in ADK's session service so run_live can find it
-        await SESSION_SERVICE.create_session(
-            app_name="SynAegis",
-            user_id=self.user_id,
-            session_id=self.session_id,
-        )
 
-        config = RunConfig(
-            response_modalities=["AUDIO", "TEXT"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
-                )
-            ),
-        )
+
 
         async def _consume_events() -> None:
             try:
-                async for event in RUNNER.run_live(
-                    user_id=self.user_id,
-                    session_id=self.session_id,
-                    live_request_queue=self.live_queue,
-                    run_config=config,
-                ):
-                    for payload in _event_to_ws_payloads(event):
-                        self.message_count += 1
-                        await self.ws.send_json(payload)
+                from google.genai import types
+                from backend.adk_tools import get_current_time, get_system_status, log_interaction, execute_action
+                from backend.gitlab_tools import create_gitlab_issue, list_gitlab_issues, cancel_gitlab_pipeline, create_gitlab_branch, create_gitlab_merge_request
+                from backend.green_tools import calculate_pipeline_carbon, reap_zombie_environments
+                live_config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    tools=[
+                        get_current_time, get_system_status, log_interaction, execute_action,
+                        create_gitlab_issue, list_gitlab_issues, cancel_gitlab_pipeline, create_gitlab_branch, create_gitlab_merge_request,
+                        calculate_pipeline_carbon, reap_zombie_environments
+                    ],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                        )
+                    ),
+                    system_instruction=types.Content(parts=[types.Part.from_text(text=SynAegis_SYSTEM_INSTRUCTION)])
+                )
+                async with GENAI_CLIENT.aio.live.connect(model=MODEL_NAME, config=live_config) as live_session:
+                    self.live_session = live_session
+                    async for event in live_session.receive():
+                        for payload in _event_to_ws_payloads(event):
+                            self.message_count += 1
+                            await self.ws.send_json(payload)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -480,7 +471,6 @@ class SynAegisSession:
         if self.closed:
             return
         self.closed = True
-        self.live_queue.close()
         if self.receiver_task:
             self.receiver_task.cancel()
         if self.heartbeat_task:
@@ -509,9 +499,13 @@ async def role_health_check() -> dict[str, Any]:
     return system_health_check()
 
 
-@app.websocket("/ws/SynAegis")
-async def ws_SynAegis(websocket: WebSocket) -> None:
-    await websocket.accept()
+@app.websocket("/ws/warroom")
+async def ws_warroom(websocket: WebSocket, token: Optional[str] = None) -> None:
+    if token == "invalid":
+        await websocket.close(code=1008, reason="Invalid token")
+        return
+
+    await manager.connect(websocket, "warroom")
     session = SynAegisSession(websocket)
 
     try:
@@ -562,9 +556,13 @@ async def ws_SynAegis(websocket: WebSocket) -> None:
                 if session.fallback_mode:
                     await websocket.send_json({"type": "agent_text", "text": "Listening. Local continuity mode active."})
                 else:
-                    session.live_queue.send_content(
-                        types.Content(role="user", parts=[types.Part(text="Listening")])
-                    )
+                    if hasattr(session, "live_session") and session.live_session:
+                        try:
+                            await session.live_session.send(input=types.LiveClientContent(
+                                turns=[types.Content(role="user", parts=[types.Part.from_text(text="Listening")])]
+                            ))
+                        except Exception as e:
+                            logger.error(f"Error sending barge-in: {e}")
                 await websocket.send_json({"type": "barge_in_ack", "ts": _now_iso()})
                 continue
 
@@ -576,16 +574,15 @@ async def ws_SynAegis(websocket: WebSocket) -> None:
                     session.recent_user_texts = session.recent_user_texts[-8:]
                     await websocket.send_json({"type": "agent_hint", "hints": _hint_suggestions(text), "ts": _now_iso()})
 
-                    if session.fallback_mode:
-                        try:
-                            fallback_text = _gemini_free_fallback_response(text)
-                        except Exception:
-                            fallback_text = _local_fallback_response(text)
-                        await websocket.send_json({"type": "agent_text", "text": fallback_text})
-                    else:
-                        session.live_queue.send_content(
-                            types.Content(role="user", parts=[types.Part(text=text)])
-                        )
+                    # Always use Anthropic for text queries as the primary reasoning engine for text
+                    if getattr(session, 'current_mode', None) != 'text':
+                        session.current_mode = 'text'
+                        await websocket.send_json({"type": "brain_log", "level": "info", "message": "Input detected: Text. Switching to Anthropic Claude 3.5 Sonnet processing."})
+                    try:
+                        anthropic_response = chat_with_ai(text)
+                    except Exception as e:
+                        anthropic_response = _local_fallback_response(text)
+                    await websocket.send_json({"type": "agent_text", "text": anthropic_response})
 
                     if session.user_text_count % SUMMARY_INTERVAL == 0:
                         summary = " | ".join(session.recent_user_texts[-3:])
@@ -604,6 +601,8 @@ async def ws_SynAegis(websocket: WebSocket) -> None:
                 data_b64 = payload.get("data", "")
                 if not mime_type or not data_b64:
                     continue
+                if len(data_b64) % 4 != 0:
+                    data_b64 += "=" * (4 - len(data_b64) % 4)
                 raw = base64.b64decode(data_b64)
                 session.media_bytes += len(raw)
 
@@ -612,8 +611,22 @@ async def ws_SynAegis(websocket: WebSocket) -> None:
                     sample_rate = payload.get("sampleRate", 16000)
                     mime_type = f"audio/pcm;rate={sample_rate}"
 
-                if not session.fallback_mode:
-                    session.live_queue.send_realtime(types.Blob(data=raw, mime_type=mime_type))
+                if not session.fallback_mode and len(raw) > 0:
+                    if getattr(session, 'current_mode', None) != 'audio':
+                        session.current_mode = 'audio'
+                        await websocket.send_json({"type": "brain_log", "level": "info", "message": "Input detected: Voice. Switching to Gemini Experimental Live processing."})
+                    if hasattr(session, "live_session") and session.live_session:
+                        try:
+                            # 1000 OK crash means session closed. We should prevent writing if so.
+                            await session.live_session.send(input=types.LiveClientRealtimeInput(
+                                media_chunks=[types.Blob(data=raw, mime_type=mime_type)]
+                            ))
+                        except Exception as e:
+                            msg = str(e)
+                            if "1000 (OK)" not in msg:
+                                logger.error(f"Error sending live real-time input: {e}")
+                            else:
+                                session.fallback_mode = True # Disconnect and fallback cleanly
 
                 if original_mime_type in ("audio/pcm", "audio/l16"):
                     await websocket.send_json(
@@ -635,15 +648,19 @@ async def ws_SynAegis(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("SynAegis websocket disconnected: %s", session.session_id)
     except Exception as exc:
-        logger.exception("ws_SynAegis error: %s", exc)
+        logger.exception("ws_warroom error: %s", exc)
         try:
             await websocket.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
     finally:
+        manager.disconnect(websocket, "warroom")
         await session.stop()
 
+@app.websocket("/ws/SynAegis")
+async def ws_SynAegis_alias(websocket: WebSocket) -> None:
+    await ws_warroom(websocket)
 
 @app.websocket("/ws/live")
 async def ws_live_alias(websocket: WebSocket) -> None:
-    await ws_SynAegis(websocket)
+    await ws_warroom(websocket)

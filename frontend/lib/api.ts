@@ -1,4 +1,10 @@
-export const API_BASE = "http://localhost:8080/api";
+const getApiBase = () => {
+    if (typeof window !== "undefined") {
+        return `${window.location.protocol}//${window.location.hostname}:8080/api`;
+    }
+    return "http://localhost:8080/api";
+};
+export const API_BASE = process.env.NEXT_PUBLIC_BACKEND_API_URL || getApiBase();
 
 export async function fetchDashboard() {
     try {
@@ -163,5 +169,27 @@ export async function fetchSecurityHistory() {
     } catch (e) {
         console.error("Fetch err fetchSecurityHistory", e);
         return [];
+    }
+}
+
+export async function fetchGreenCarbon(durationSeconds: number = 600) {
+    try {
+        const res = await fetch(`${API_BASE}/green/carbon?duration_seconds=${durationSeconds}`);
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (e) {
+        console.error("Fetch err fetchGreenCarbon", e);
+        return null;
+    }
+}
+
+export async function reapGreenZombies(idleDays: number = 7) {
+    try {
+        const res = await fetch(`${API_BASE}/green/zombie/reap?idle_days=${idleDays}`, { method: 'POST' });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (e) {
+        console.error("Fetch err reapGreenZombies", e);
+        return null;
     }
 }

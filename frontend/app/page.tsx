@@ -24,7 +24,7 @@ function DashboardContent() {
                 <div className="relative min-h-screen w-full">
                     <button
                         onClick={() => setActiveView("dashboard")}
-                        className="absolute top-6 left-6 z-[100] rounded-lg border border-cyan-500/30 bg-black/50 px-4 py-2 text-xs uppercase tracking-widest text-cyan-300 backdrop-blur-md transition-all hover:bg-cyan-500/20"
+                        className="absolute top-24 left-6 z-[100] rounded-lg border border-cyan-500/30 bg-black/50 px-4 py-2 text-xs uppercase tracking-widest text-cyan-300 backdrop-blur-md transition-all hover:bg-cyan-500/20"
                     >
                         ← Back to Control Plane
                     </button>
@@ -68,7 +68,7 @@ function DashboardContent() {
 
             {/* Main Content Area - padded left for sidebar */}
             <div className={`flex-1 transition-all duration-300 ${activeView !== 'warroom' && activeView !== 'pipelines' && activeView !== 'security' && activeView !== 'cloud' && activeView !== 'settings' ? 'ml-20' : ''}`}>
-                
+
                 {/* Background Effects */}
                 <div className="fixed inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(6,182,212,0.15),transparent_50%)] pointer-events-none" />
                 <div className="fixed inset-0 flex z-0 pointer-events-none items-center justify-center opacity-[0.05]">

@@ -30,6 +30,43 @@ export default function CloudDashboard({ onBack }: { onBack: () => void }) {
     const [searchQuery, setSearchQuery] = useState("");
     const [activeAction, setActiveAction] = useState<string | null>(null);
     const [expandedService, setExpandedService] = useState<string | null>(null);
+    const [greenCarbon, setGreenCarbon] = useState<any>(null);
+    const [reaping, setReaping] = useState(false);
+
+    const fetchGreenCarbon = async () => {
+        try {
+            const res = await fetch("http://localhost:8080/green/footprint");
+            if (res.ok) {
+                return await res.json();
+            }
+        } catch(e) { console.error(e) }
+        return null;
+    };
+
+    useEffect(() => {
+        fetchGreenCarbon().then(res => {
+            if (res) setGreenCarbon(res);
+        });
+    }, []);
+
+    const reapGreenZombies = async (days: number) => {
+        try {
+            const res = await fetch(`http://localhost:8080/green/zombies?days_idle=${days}`, { method: 'POST' });
+            return await res.json();
+        } catch(e) { console.error(e) }
+        return null;
+    };
+    const handleReapZombies = async () => {
+        setReaping(true);
+        addToast("Scanning for zombie environments...");
+        const res = await reapGreenZombies(7);
+        if (res && res.reaped) {
+            addToast(JSON.stringify(res.reaped));
+        } else {
+            addToast("Environment is clean.");
+        }
+        setReaping(false);
+    };
 
     // Simulate real-time metric fluctuations
     useEffect(() => {
@@ -132,7 +169,7 @@ export default function CloudDashboard({ onBack }: { onBack: () => void }) {
                         <div className="flex items-center gap-2 text-emerald-500 mb-2 font-bold text-xs uppercase tracking-wider">
                             <Leaf className="w-4 h-4" /> GreenOps Impact
                         </div>
-                        <div className="text-3xl font-light text-emerald-400">-12kg<span className="text-sm ml-2 font-medium">CO₂e</span></div>
+                        <div className="text-3xl font-light text-emerald-400">{greenCarbon ? (greenCarbon.total_carbon_g/1000).toFixed(2) : '...'}<span className="text-sm ml-2 font-medium">kg CO₂e</span></div><div className="text-[10px] text-emerald-500/70 mt-1">{greenCarbon ? greenCarbon.verdict : 'Analyzing...'}</div>
                     </div>
                 </div>
 
