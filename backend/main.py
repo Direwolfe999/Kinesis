@@ -1,3 +1,6 @@
+from google.adk.services.session_service import InMemorySessionService
+from google.adk.runners import Runner
+from google.adk.agents import LlmAgent
 """
 SynAegis BACKEND - PRODUCTION GEMINI LIVE API
 Async backend with fallback cascade, quota handling, and WebSocket relay
